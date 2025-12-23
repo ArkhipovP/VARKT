@@ -1,72 +1,86 @@
 import os
 import time
-from enum import Enum, auto
-
 import krpc
 import pandas as pd
-from math_utils import get_angle, get_phase_angle, show_orbit_plot
+from utils import get_angle, get_phase_angle, show_orbit_plot, normalize_data, data_to_csv
 from constants import *
 
 
-class FlightState(Enum):
-    PRELAUNCH = auto()                # Ожидание старта
-    LAUNCH = auto()                   # Вертикальный взлет
-    GRAVITY_TURN = auto()             # Гравитационный маневр (до 45 км)
-    CIRCULARIZATION_WAITING = auto()  # Инерциальный полет в ожидании точки апоцентра
-    CIRCULARIZATION = auto()          # Циркуляризация: прожиг в апоцентре
-    ORBITING = auto()                 # Достигнута круглая орбита
-
-
 def control_vessel(vessel, conn):
+    # Константы
+    kerbin = conn.space_center.bodies["Kerbin"]
+    mun = conn.space_center.bodies["Mun"]
+    reference_frame = kerbin.reference_frame
+
     # Потоки данных
     ut = conn.add_stream(getattr, conn.space_center, "ut")
     altitude = conn.add_stream(getattr, vessel.flight(), "mean_altitude")
+    mass = conn.add_stream(getattr, vessel, "mass")
+    speed = conn.add_stream(getattr, vessel.flight(reference_frame), "speed")
     apoapsis = conn.add_stream(getattr, vessel.orbit, "apoapsis_altitude")
     periapsis = conn.add_stream(getattr, vessel.orbit, "periapsis_altitude")
-    velocity = conn.add_stream(getattr, vessel.flight(vessel.orbit.body.reference_frame), "speed")
-    mass = conn.add_stream(getattr, vessel, "mass")
     time_to_ap = conn.add_stream(getattr, vessel.orbit, "time_to_apoapsis")
 
-    # Словарь для данных
-    data = {
-        "time": [],
-        "altitude": [],
-        "velocity": [],
-        "mass": [],
-        "apoapsis": [],
-        "periapsis": [],
-        "vessel_angle": [],
-        "mun_angle": [],
-        "phase_angle": [],
-    }
+    # Векторные величины
+    position = conn.add_stream(vessel.position, reference_frame)
+    velocity = conn.add_stream(vessel.velocity, reference_frame)
+
+    # Ресурсы ступеней
+    current_stage = vessel.control.current_stage - 1
+    liquid_fuel = conn.add_stream(vessel.resources_in_decouple_stage(current_stage - 1).amount, "LiquidFuel")
+    oxidizer = conn.add_stream(vessel.resources_in_decouple_stage(current_stage - 1).amount, "Oxidizer")
+
+    # Инициализация словаря для данных
+    data = {key: [] for key in DATA_KEYS}
 
     prev_state = None
     state = FlightState.PRELAUNCH
     start_time = ut()
-    kerbin = conn.space_center.bodies["Kerbin"]
-    mun = conn.space_center.bodies["Mun"]
+    last_stage_time = 0
 
-    # Основной цикл управления и сбора данных
+    vessel.control.sas = False
+    vessel.auto_pilot.engage()
+
     try:
+        # Основной цикл управления и сбора данных
         # Работаем, пока не выйдем на круговую орбиту
         while state != FlightState.ORBITING:
             curr_t = ut() - start_time
+            pos = position()
+            vel = velocity()
 
-            # Сбор телеметрии (каждую итерацию)
+            # Телеметрия
             data["time"].append(curr_t)
             data["altitude"].append(altitude())
-            data["velocity"].append(velocity())
             data["mass"].append(mass())
+
+            data["position_x"].append(pos[0])
+            data["position_y"].append(pos[1])
+            data["position_z"].append(pos[2])
+
+            data["velocity"].append(speed())
+            data["velocity_x"].append(vel[0])
+            data["velocity_y"].append(vel[1])
+            data["velocity_z"].append(vel[2])
+
+            # Орбитальные параметры
             data["apoapsis"].append(apoapsis())
             data["periapsis"].append(periapsis())
-            data["vessel_angle"].append(get_angle(kerbin.reference_frame, vessel))
-            data["mun_angle"].append(get_angle(kerbin.reference_frame, mun))
-            data["phase_angle"].append(get_phase_angle(kerbin.reference_frame, vessel, mun))
 
-            # Проверка ступеней
-            if velocity() > 50 and vessel.thrust < 0.1:
+            # Углы (вычисляются через ваши функции из math_utils)
+            # Передаем ref_frame, чтобы углы считались в той же системе координат
+            data["vessel_angle"].append(get_angle(reference_frame, vessel))
+            data["mun_angle"].append(get_angle(reference_frame, mun))
+            data["phase_angle"].append(get_phase_angle(reference_frame, vessel, mun))
+
+            # Условие сброса
+            if (liquid_fuel() < 0.05 or oxidizer() < 0.05) and (ut() - last_stage_time > 0.6):
                 vessel.control.activate_next_stage()
-                print(f"[{int(curr_t)}с] Активация следующей ступени...")
+                print(f"[{int(curr_t)}с] Сброс ступени S{current_stage}. Активация следующей ступени...")
+                current_stage = vessel.control.current_stage
+                liquid_fuel = conn.add_stream(vessel.resources_in_decouple_stage(current_stage - 1).amount, "LiquidFuel")
+                oxidizer = conn.add_stream(vessel.resources_in_decouple_stage(current_stage - 1).amount, "Oxidizer")
+                last_stage_time = ut()
 
             if state != prev_state:
                 prev_state = state
@@ -84,13 +98,15 @@ def control_vessel(vessel, conn):
                 state = FlightState.LAUNCH
 
             elif state == FlightState.LAUNCH:
-                if altitude() > 250:
+                if altitude() > GRAV_TURN_START:
                     state = FlightState.GRAVITY_TURN
 
             elif state == FlightState.GRAVITY_TURN:
-                # Наклон до границы GRAV_TURN_R (45 км)
-                frac = (altitude() - 250) / (GRAV_TURN_R - 250)
-                vessel.auto_pilot.target_pitch_and_heading(90 - (frac * 90), 90)
+                frac = (altitude() - GRAV_TURN_START) / (GRAV_TURN_CEIL - GRAV_TURN_START)
+                frac = max(0, min(1, frac))
+
+                target_pitch = 90 - (frac * 90)
+                vessel.auto_pilot.target_pitch_and_heading(target_pitch, 90)
 
                 if apoapsis() >= KERBIN_ORBIT_R:
                     vessel.control.throttle = 0.0
@@ -128,29 +144,17 @@ def control_vessel(vessel, conn):
     print("Сбор данных завершён.")
     vessel.auto_pilot.disengage()
 
-    min_length = len(min(data.values(), key=len))
-
-    for key in data.keys():
-        data[key] = data[key][:min_length]
-
-    df_ksp = pd.DataFrame(data)
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    data_folder = os.path.join(current_dir, "..", "data")
-    if not os.path.exists(data_folder):
-        os.makedirs(data_folder)
-
-    file_name = os.path.join(data_folder, "ksp_data_orbit.csv")
-
-    df_ksp.to_csv(file_name, index=False)
-    print("KSP данные о выводе на орбиту экспортированы в ksp_data_orbit.csv")
-    print("Построение визуализации...")
-    show_orbit_plot(data)
+    normalize_data(data)
+    return data
 
 
 if __name__ == "__main__":
     print(f"{" АВТОПИЛОТ КОРАБЛЯ ":#^40}")
     conn = krpc.connect(name="Apollo 11 launch autopilot")
-    control_vessel(conn.space_center.active_vessel, conn)
-    control_vessel(conn.space_center.active_vessel, conn)
+    data = control_vessel(conn.space_center.active_vessel, conn)
     print(f"{" ПОЛЁТ ЗАВЕРШЁН ":#^40}")
+
+    data_to_csv(data, "ksp_data_orbit.csv")
+    print("\nKSP данные о выводе на орбиту экспортированы в ksp_data_orbit.csv")
+    print("Построение визуализации...")
+    show_orbit_plot(data)

@@ -1,6 +1,9 @@
 import math
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 
 
 def get_angle(reference, target):
@@ -57,3 +60,23 @@ def show_orbit_plot(data):
 
     plt.tight_layout()
     plt.show()
+
+
+def normalize_data(data):
+    min_length = len(min(data.values(), key=len))
+
+    for key in data.keys():
+        data[key] = data[key][:min_length]
+
+
+def data_to_csv(data, filename):
+    data_frame = pd.DataFrame(data)
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    data_folder = os.path.join(current_dir, "..", "data")
+    if not os.path.exists(data_folder):
+        os.makedirs(data_folder)
+
+    file_name = os.path.join(data_folder, filename)
+
+    data_frame.to_csv(file_name, index=False)

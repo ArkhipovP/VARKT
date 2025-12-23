@@ -1,3 +1,5 @@
+from enum import Enum, auto
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -7,14 +9,38 @@ KERBIN_R = 600000  # Радиус Кербина (м)
 KERBIN_ATMOSPHERE_R = 70000  # Радиус атмосферы Кербина относительно уровня земли
 KERBIN_DENSITY = 1.225  # Плотность воздуха на уровне моря (кг/м^3)
 KERBIN_PRESSURE = 101325  # Давление на уровне моря (Па)
+KERBIN_G = 9.80665
 H_SCALE = 5600  # Шкала высот (м)
 
+# Константы ракеты
+S_REF = 12.56  # Примерная площадь для тяжелой ракеты (радиус ~2м)
+C_D = 0.25     # Коэффициент лобового сопротивления
+
 # Данные для гравитационного манёвра
-GRAV_TURN_R = 45000  # "Потолок" поворота гравитационного манёвра (подобран эмпирически на основе графика)
+GRAV_TURN_START = 500   # Высота для начала
+GRAV_TURN_CEIL = 45000  # "Потолок" поворота гравитационного манёвра (подобран эмпирически на основе графика)
 
 # Данные для трансфера к Муне
 MUN_ORBIT_R = 12000000  # Радиус орбиты Муны (м)
 KERBIN_ORBIT_R = 190000  # Наша высота парковочной орбиты (м)
+
+# Ключи в словарях данных
+DATA_KEYS = ["time", "altitude", "mass",
+             "position_x", "position_y", "position_z",
+             "velocity", "velocity_x", "velocity_y", "velocity_z",
+             "apoapsis", "periapsis",
+             "vessel_angle", "mun_angle", "phase_angle"]
+
+
+# Состояния FSM
+class FlightState(Enum):
+    PRELAUNCH = auto()
+    LAUNCH = auto()
+    GRAVITY_TURN = auto()
+    COASTING_TO_SPACE = auto()
+    CIRCULARIZATION_WAITING = auto()
+    CIRCULARIZATION = auto()
+    ORBITING = auto()
 
 
 def calculate_full_transfer():
