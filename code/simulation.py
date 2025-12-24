@@ -6,6 +6,9 @@ import numpy as np
 
 class Vessel:
     def __init__(self, starting_data: dict[str, float]):
+        # Относительно этого вектора измеряются pitch и heading (как в KSP мы начинаем со стартовой площадки)
+        self.base_orientation = np.array([starting_data["pitch"] - 90, starting_data["heading"], starting_data["roll"]])
+
         # Параметры ступеней
         self.stages = [
             {   # S14, "Грохот" х10
@@ -72,7 +75,7 @@ class Vessel:
             return False
 
     def target_pitch_and_heading(self, pitch: float, heading: float) -> None:
-        self.pitch = pitch
+        self.pitch = pitch + self.base_orientation()
         self.heading = heading
 
     # Получение высоты над поверхностью планеты
