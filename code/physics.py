@@ -318,7 +318,6 @@ DATA_KEYS = [
 ]
 
 
-
 # Состояния FSM
 class FlightState(Enum):
     PRELAUNCH = auto()

@@ -1,6 +1,7 @@
 import krpc
 import math
 import pandas as pd
+import numpy as np
 from krpc.services.spacecenter import ReferenceFrame, Vessel
 from utils import show_orbit_plot, normalize_data, data_to_csv
 from physics import *
@@ -56,8 +57,8 @@ def run_autopilot(vessel: Vessel, conn, render_time: float) -> pd.DataFrame:
         while state != FlightState.ORBITING:
             curr_ut = ut()
             curr_t = curr_ut - start_time
-            pos_raw = position()
-            pos_vector = np.array(pos_raw)
+            pos_vector = np.array(position())
+            vel_vector = np.array(velocity())
 
             # Сбор телеметрии
             if curr_t >= last_render_time + render_time:
@@ -68,6 +69,9 @@ def run_autopilot(vessel: Vessel, conn, render_time: float) -> pd.DataFrame:
                 data["pos_x"].append(pos_vector[0])
                 data["pos_y"].append(pos_vector[1])
                 data["pos_z"].append(pos_vector[2])
+                data["vel_x"].append(vel_vector[0])
+                data["vel_y"].append(vel_vector[1])
+                data["vel_z"].append(vel_vector[2])
 
                 # Силы
                 f_grav = (-pos_vector / np.linalg.norm(pos_vector)) * flight.g_force
@@ -82,10 +86,6 @@ def run_autopilot(vessel: Vessel, conn, render_time: float) -> pd.DataFrame:
                 data["grav_x"].append(f_grav[0])
                 data["grav_y"].append(f_grav[1])
                 data["grav_z"].append(f_grav[2])
-
-                direction = conn.space_center.transform_direction((0, 0, 1), vessel.reference_frame, reference_frame)
-                f_thrust = np.array(direction) * vessel.thrust
-                f_aero = flight.aerodynamic_force
 
                 data["thrust_x"].append(f_thrust[0])
                 data["thrust_y"].append(f_thrust[1])
@@ -144,8 +144,16 @@ def run_autopilot(vessel: Vessel, conn, render_time: float) -> pd.DataFrame:
                 target_p = calculate_pitch(altitude(), GRAV_TURN_START, GRAV_TURN_CEIL, 0.4)
                 vessel.auto_pilot.target_pitch_and_heading(target_p, 90)
 
+                # Ускорение времени во время гравитационного маневра
+                if altitude() < 70000:
+                    if conn.space_center.physics_warp_factor < 3:
+                        conn.space_center.physics_warp_factor = 3
+                else:
+                    conn.space_center.physics_warp_factor = 0
+
                 if apoapsis() >= KERBIN_ORBIT_R:
                     vessel.control.throttle = 0.0
+                    conn.space_center.physics_warp_factor = 0  # Сброс при достижении цели
                     print(f"Целевой апоцентр достигнут.")
                     state = FlightState.CIRCULARIZATION_WAITING
 
@@ -200,6 +208,10 @@ def run_autopilot(vessel: Vessel, conn, render_time: float) -> pd.DataFrame:
         print(f"Автопилот остановлен преждевременно.\n")
     except Exception as e:
         print(f"i don't care but {e}")
+    finally:
+        # Гарантируем сброс ускорения при выходе
+        conn.space_center.physics_warp_factor = 0
+        conn.space_center.rails_warp_factor = 0
 
     print("Сбор данных завершён.\n")
     try:
