@@ -1,188 +1,255 @@
-from utils import normalize_data, show_orbit_plot, data_to_csv
-from constants import *
+import pandas as pd
+from utils import normalize_data, data_to_csv, get_starting_data
+from physics import *
 import numpy as np
 
 
 class Vessel:
-    def __init__(self):
-        # Параметры ракеты остаются прежними
+    def __init__(self, starting_data: dict[str, float]):
+        # Параметры ступеней
         self.stages = [
-            {  # S14
-                "thrust": 13790000.0,
-                "m0": 899000.0,  # кумулятивная масса
-                "fuel": 592000.0,
-                "isp": 285.0  # Среднее значение для старта
+            {   # S14, "Грохот" х10
+                "number": 14,
+                "thrust_vac": 1500000 * 10,  # 15 000 кН
+                "thrust_sea": 1379000 * 10,  # 13 790 кН
+                "m0": 899000,
+                "fuel": 592000,
+                "isp_vac": 310,
+                "isp_sea": 285
             },
-            {  # S12
-                "thrust": 2434900.0,
-                "m0": 169000.0,
-                "fuel": 53800.0,
-                "isp": 295.0
+            {   # S12, "Вектор" x4
+                "number": 12,
+                "thrust_vac": 1000000 * 4,
+                "thrust_sea": 936510 * 4,
+                "m0": 169000,
+                "fuel": 53800,
+                "isp_vac": 315,
+                "isp_sea": 295
             },
-            {  # S10
-                "thrust": 936510.0,
+            {   # S10, "Вектор" x1
+                "number": 10,
+                "thrust_vac": 1000000,
+                "thrust_sea": 936510,
                 "m0": 88900.0,
                 "fuel": 32000.0,
-                "isp": 295.0
-            }
+                "isp_vac": 315.0,
+                "isp_sea": 295.0
+            },
         ]
         self.current_stage_index = 0
-        stage = self.stages[self.current_stage_index]
-        self.mass = stage["m0"]
-        self.thrust = stage["thrust"]
-        self.isp = stage["isp"]
-        self.fuel = stage["fuel"]
+        self.stage = self.stages[self.current_stage_index]
+        self.current_stage_number = self.stage["number"]
+        self.mass = self.stage["m0"]
+        self.fuel = self.stage["fuel"]
 
         # Начальное положение: на поверхности (по оси Y, Кербин центрирован в 0,0)
-        self.pos = np.array([0.0, KERBIN_R])
-        self.vel = np.array([0.0, 0.0])
-        self.throttle = 0.0
-        self.pitch = 90.0
+        self.pos = np.array([starting_data["position_x"], starting_data["position_y"], starting_data["position_z"]])
+        self.vel = np.array([0.0, 0.0, 0.0])
+        self.accel = np.array([0.0, 0.0, 0.0])
+        self.throttle = 0
+        self.pitch = 90
+        self.heading = 90
 
-    def update_physics(self, dt):
-        r_mag = np.linalg.norm(self.pos)
-        unit_r = self.pos / r_mag
-        v_mag = np.linalg.norm(self.vel)
+    # Загрузка данных ступени
+    def _load_stage_data(self, index: int) -> None:
+        stage = self.stages[index]
+        self.mass = stage["m0"]
+        self.thrust = stage["thrust"]
+        self.fuel = stage["fuel"]
 
-        # 1. Логика разделения ступеней
-        if self.fuel <= 0 and self.current_stage_index < len(self.stages) - 1:
+    # Активация следующей ступени
+    def activate_next_stage(self) -> bool:
+        if self.current_stage_index < len(self.stages) - 1:
             self.current_stage_index += 1
-            new_stage = self.stages[self.current_stage_index]
-            self.mass = new_stage["m0"]
-            self.thrust = new_stage["thrust"]
-            self.isp = new_stage["isp"]
-            self.fuel = new_stage["fuel"]
 
-        # 2. Расчет сил
-        # В 2D симуляции Pitch отсчитывается от горизонта.
-        # Чтобы взлететь вверх от поверхности (unit_r), нам нужно вращать вектор тяги
-        angle_to_up = np.arctan2(unit_r[1], unit_r[0])
-        # Угол тяги в глобальных координатах
-        thrust_angle = angle_to_up + np.radians(self.pitch - 90)
-        thrust_dir = np.array([np.cos(thrust_angle), np.sin(thrust_angle)])
+            self._load_stage_data(self.current_stage_index)
 
-        current_thrust = self.thrust * self.throttle if self.fuel > 0 else 0.0
-        f_thrust = thrust_dir * current_thrust
-        f_grav = -unit_r * (KERBIN_GRAV * self.mass / r_mag ** 2)
+            # print(f"[{self.current_stage_index - 1} -> {self.current_stage_index}] Ступень отделена. "
+            #       f"Новая масса: {self.mass / 1000:.1f}т, Тяга: {self.thrust / 1000:.1f}кН")
+            return True
+        else:
+            print("Последняя ступень уже активна. Сбрасывать нечего.")
+            return False
 
-        f_drag = np.array([0.0, 0.0])
-        if (r_mag - KERBIN_R) < KERBIN_ATMOSPHERE_R:
-            rho = KERBIN_DENSITY * np.exp(-(r_mag - KERBIN_R) / H_SCALE)
-            if v_mag > 0.1:
-                f_drag = -(self.vel / v_mag) * (0.5 * rho * v_mag ** 2 * C_D * S_REF)
+    def target_pitch_and_heading(self, pitch: float, heading: float) -> None:
+        self.pitch = pitch
+        self.heading = heading
 
-        accel = (f_thrust + f_grav + f_drag) / self.mass
-        self.vel += accel * dt
-        self.pos += self.vel * dt
+    # Получение высоты над поверхностью планеты
+    def altitude(self, planet: Planet) -> float:
+        return np.linalg.norm(self.pos) - planet.radius
 
-        # 3. Расход топлива
-        if self.throttle > 0 and self.fuel > 0:
-            dm = (self.throttle * self.thrust) / (self.isp * 9.81) * dt
-            self.mass -= dm
-            self.fuel -= dm
+    # Получение скорости относительно планеты
+    def velocity(self, planet: Planet) -> float:
+        return np.linalg.norm(self.vel)
 
-    def altitude(self):
-        return np.linalg.norm(self.pos) - KERBIN_R
+    # Суммирование всех сил, действующих на корабль (второй закон Ньютона)
+    def get_forces(self, pos: np.ndarray, vel: np.ndarray, mass: float) -> np.ndarray:
+        alt = self.altitude(KERBIN)
 
-    def get_orbital_elements(self):
-        r_vec = self.pos
-        v_vec = self.vel
-        r_mag = np.linalg.norm(r_vec)
-        v_mag = np.linalg.norm(v_vec)
+        f_grav = calculate_gravity_force(KERBIN, mass, pos)
+        f_drag = calculate_drag_force(KERBIN, alt, vel, DRAG_COEFFICIENT, VESSEL_AREA)
+        f_thrust = calculate_thrust_force(KERBIN, alt, self.throttle, self.pitch, self.heading, self.stage)
+        # print(f_grav, f_drag, f_thrust, f_grav + f_drag + f_thrust)
+        return f_grav + f_drag + f_thrust
 
-        energy = (v_mag ** 2 / 2) - (KERBIN_GRAV / r_mag)
-        a = -KERBIN_GRAV / (2 * energy)
+    # Такт обновления физики (метод Верле второго порядка)
+    def update_physics(self, dt: float):
+        # Ускорение в текущий момент времени t (второй закон Ньютона)
+        f_curr = self.get_forces(self.pos, self.vel, self.mass)
+        self.accel = f_curr / self.mass
 
-        # Угловой момент (в 2D это скаляр)
-        h = r_vec[0] * v_vec[1] - r_vec[1] * v_vec[0]
+        # Положение на основе текущих скорости и ускорения: r(t + dt) = r(t) + v(t)*dt + 0.5 * a(t) * dt^2
+        new_pos = self.pos + self.vel * dt + 0.5 * self.accel * dt ** 2
 
-        e_sq = 1 + (2 * energy * h ** 2) / (KERBIN_GRAV ** 2)
-        e = np.sqrt(max(0, e_sq))
+        # "Полушаговая" скоорость для расчёта в новой точке (предиктор)
+        v_mid = self.vel + self.accel * dt
 
-        ap = a * (1 + e) - KERBIN_R
-        pe = a * (1 - e) - KERBIN_R
-        return ap, pe, e
+        # Рассчитываем ускорение в новый момент времени t + dt
+        # Мы учитываем изменение массы (упрощенно считаем расход линейным за dt)
+        dm = calculate_fuel_consumption(self.stage, self.throttle, dt)
+        new_mass = self.mass - dm
+
+        f_next = self.get_forces(new_pos, v_mid, new_mass)
+        new_accel = f_next / new_mass
+
+        # Обновляем скорость: v(t + dt) = v(t) + 0.5 * (a(t) + a(t+dt)) * dt
+        self.vel = self.vel + 0.5 * (self.accel + new_accel) * dt
+
+        self.pos = new_pos
+        self.mass = new_mass
 
 
-def run_simulation():
-    vessel = Vessel()
+def run_simulation(starting_data: dict[str, float], dt: float, render_time: float) -> pd.DataFrame:
+    vessel = Vessel(starting_data)
     state = FlightState.PRELAUNCH
-    t = 0.0
-    dt = 0.1  # Для ускорения расчета увеличим шаг
+    prev_state = None
+    t = 0
+    last_stage_time = 0
+    last_render_time = 0
 
-    # Полный набор ключей как в KSP скрипте
+    # Инициализация словаря для данных
     data = {key: [] for key in DATA_KEYS}
 
-    while state != FlightState.ORBITING and t < 2000:
-        ap, pe, ecc = vessel.get_orbital_elements()
-        alt = vessel.altitude()
-        v_mag = np.linalg.norm(vessel.vel)
+    try:
+        # Основной цикл управления и сбора данных
+        # Работаем, пока не выйдем на круговую орбиту
+        while state != FlightState.ORBITING:
+            pos = vessel.pos
+            vel = vessel.vel
 
-        # Логика FSM (Линейный подход)
-        if state == FlightState.PRELAUNCH:
-            vessel.throttle = 1.0
-            state = FlightState.LAUNCH
-        elif state == FlightState.LAUNCH:
-            vessel.pitch = 90
-            if alt > 500: state = FlightState.GRAVITY_TURN
-        elif state == FlightState.GRAVITY_TURN:
-            frac = max(0, min(1, (alt - 500) / (GRAV_TURN_CEIL - 500)))
-            vessel.pitch = 90 - (frac * 90)  # Линейный наклон
-            if ap >= KERBIN_ORBIT_R:
-                vessel.throttle = 0.0
-                state = FlightState.CIRCULARIZATION_WAITING
-        elif state == FlightState.CIRCULARIZATION_WAITING:
-            vessel.pitch = 0
-            if alt >= 70000 and (KERBIN_ORBIT_R - pe) > 100:
-                # В симуляции просто включаем тягу когда высоко
-                state = FlightState.CIRCULARIZATION
-        elif state == FlightState.CIRCULARIZATION:
-            vessel.pitch = 0
-            until_pe = KERBIN_ORBIT_R - pe
-            vessel.throttle = 1.0 if until_pe > 5000 else 0.1
-            if pe >= ap * 0.98 or until_pe <= 0:
-                vessel.throttle = 0.0
-                state = FlightState.ORBITING
+            if state != FlightState.PRELAUNCH:
+                vessel.update_physics(dt)
 
-        vessel.update_physics(dt)
-        t += dt
+            if t > last_render_time + render_time:
+                # Телеметрия
+                data["time"].append(t)
+                data["altitude"].append(vessel.altitude(KERBIN))
+                data["mass"].append(vessel.mass)
 
-        # ЗАПИСЬ ТЕЛЕМЕТРИИ СОГЛАСНО DATA_KEYS
-        data["time"].append(t)
-        data["altitude"].append(alt)
-        data["mass"].append(vessel.mass)
+                data["position_x"].append(pos[0])
+                data["position_y"].append(pos[1])
+                data["position_z"].append(pos[2])
 
-        # Позиция (в 2D, Z оставляем 0)
-        data["position_x"].append(vessel.pos[0])
-        data["position_y"].append(vessel.pos[1])
-        data["position_z"].append(0.0)
+                data["velocity"].append(vessel.velocity(KERBIN))
+                data["velocity_x"].append(vessel.vel[0])
+                data["velocity_y"].append(vessel.vel[1])
+                data["velocity_z"].append(vessel.vel[2])
 
-        # Скорость
-        data["velocity"].append(v_mag)
-        data["velocity_x"].append(vessel.vel[0])
-        data["velocity_y"].append(vessel.vel[1])
-        data["velocity_z"].append(0.0)
+                # Орбитальные параметры
+                data["apoapsis"].append(calculate_apoapsis_altitude(KERBIN, pos, vel))
+                data["periapsis"].append(calculate_periapsis_altitude(KERBIN, pos, vel))
 
-        # Орбитальные данные
-        data["apoapsis"].append(ap)
-        data["periapsis"].append(pe)
+                # Углы
+                # data["vessel_angle"].append(get_angle(reference_frame, vessel))
+                # data["mun_angle"].append(get_angle(reference_frame, mun))
+                # data["phase_angle"].append(get_phase_angle(reference_frame, vessel, mun))
+                data["vessel_angle"].append(0)
+                data["mun_angle"].append(0)
+                data["phase_angle"].append(0)
+                last_render_time = t
 
-        # Углы
-        v_angle = np.degrees(np.arctan2(vessel.pos[1], vessel.pos[0]))
-        data["vessel_angle"].append(v_angle)
-        data["mun_angle"].append(0.0)  # Для простоты Муна в точке 0 градусов
-        data["phase_angle"].append(0.0 - v_angle)
+            # Условие сброса
+            if (vessel.fuel < 0.05 * vessel.stage["fuel"]) and (t - last_stage_time > 1.5):
+                print(f"[{int(t)}с] Сброс ступени S{vessel.current_stage_number}. Активация следующей ступени...")
+                vessel.activate_next_stage()
+                last_stage_time = t
+
+            if state != prev_state:
+                prev_state = state
+                state_str = f" [{int(t)}с] СОСТОЯНИЕ: {state.name} "
+                print(f"\n{state_str:-^60}\n")
+
+            if state == FlightState.PRELAUNCH:
+                for i in range(3, 0, -1):
+                    print(f"{i}...")
+                    t += 1 - dt
+                print("Пуск!")
+                vessel.throttle = 1.0
+                vessel.target_pitch_and_heading(90, 90)
+                state = FlightState.LAUNCH
+
+            elif state == FlightState.LAUNCH:
+                if vessel.altitude(KERBIN) > GRAV_TURN_START:
+                    state = FlightState.GRAVITY_TURN
+
+            elif state == FlightState.GRAVITY_TURN:
+                target_pitch = calculate_pitch(vessel.altitude(KERBIN), GRAV_TURN_START, GRAV_TURN_CEIL, 0.5)
+                vessel.target_pitch_and_heading(target_pitch, 90)
+
+                if calculate_apoapsis_altitude(KERBIN, pos, vel) >= KERBIN_ORBIT_R:
+                    vessel.throttle = 0.0
+                    print(f"Апоцентр {KERBIN_ORBIT_R}м достигнут. Инерциальный полет.")
+
+                    vessel.target_pitch_and_heading(90, 90)
+                    state = FlightState.CIRCULARIZATION_WAITING
+
+            elif state == FlightState.CIRCULARIZATION_WAITING:
+                vessel.target_pitch_and_heading(0, 90)
+                if vessel.altitude(KERBIN) >= KERBIN.atmosphere_height and \
+                        calculate_time_to_apoapsis(KERBIN, pos, vel) < 15:
+
+                    print("Точка манёвра достигнута. Начало циркуляризации.")
+                    state = FlightState.CIRCULARIZATION
+
+            elif state == FlightState.CIRCULARIZATION:
+                vessel.target_pitch_and_heading(0, 90)
+                until_pe = KERBIN_ORBIT_R - calculate_periapsis_altitude(KERBIN, pos, vel)
+                # Условие выхода на стабильную орбиту
+                if until_pe <= 0 or calculate_periapsis_altitude(KERBIN, pos, vel) >= \
+                        calculate_apoapsis_altitude(KERBIN, pos, vel) * 0.98:
+
+                    vessel.throttle = 0.0
+                    print("Орбита сформирована.")
+                    state = FlightState.ORBITING
+                else:
+                    # Плавная тяга для точности
+                    vessel.throttle = 0.05 if until_pe < 5000 else 1.0
+
+            t += dt
+    except KeyboardInterrupt:
+        print("Симуляция остановлена преждевременно.\n")
+
+    print("Сбор данных завершён.\n")
 
     normalize_data(data)
-    return data
+    return pd.DataFrame(data)
 
 
 if __name__ == "__main__":
-    print(f"{" СИМУЛЯЦИЯ ПОЛЁТА ":#^40}")
-    data = run_simulation()
-    print(f"{" ПОЛЁТ ЗАВЕРШЁН ":#^40}")
+    print("Загрузка стартовых данных из data/ksp_data_orbit.csv...")
+    starting_data = get_starting_data("ksp_data_orbit.csv")
+    if starting_data is None:
+        print("Загрузка не удалась, стартовые данные по умолчанию.")
+        starting_data = {key: 0 for key in DATA_KEYS}
+        starting_data["altitude"] = 85
+        starting_data["position_z"] = 600000
 
-    data_to_csv(data, "simulation_data_orbit.csv")
-    print("\nДанные симуляции о выводе на орбиту экспортированы в simulation_data_orbit.csv")
+    print(f"\n{" СИМУЛЯЦИЯ ПОЛЁТА ":#^60}")
+    data = run_simulation(starting_data, 0.01, 0.5)
+    print(f"{" ПОЛЁТ ЗАВЕРШЁН ":#^60}")
+
+    data_to_csv(data, "sim_data_orbit.csv")
+    print("\nДанные симуляции о выводе на орбиту экспортированы в sim_data_orbit.csv")
     print("Построение визуализации...")
-    show_orbit_plot(data)
+    # show_orbit_plot(data)
